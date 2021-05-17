@@ -656,6 +656,13 @@ src_libdrivers_la_SOURCES += \
 	src/hardware/uni-t-ut32x/protocol.c \
 	src/hardware/uni-t-ut32x/api.c
 endif
+if HW_XMOS_XSCOPE
+src_libdrivers_la_SOURCES += \
+	src/hardware/xmos/protocol.h \
+	src/hardware/xmos/protocol.c \
+	src/hardware/xmos/api.c \
+	src/hardware/xmos/xmos_tcp.c
+endif
 if HW_YOKOGAWA_DLM
 src_libdrivers_la_SOURCES += \
 	src/hardware/yokogawa-dlm/protocol.h \
