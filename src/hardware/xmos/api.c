@@ -359,6 +359,7 @@ cg->name = (char*) all_channels[i].name;
 			ag->pattern = pattern;
 			ag->avg_val = 0.0f;
 			ag->num_avgs = 0;
+			ag->samples_todo = 0;
 			g_hash_table_insert(devc->ch_ag, ch, ag);
 
 			if (++pattern == ARRAY_SIZE(analog_pattern_str))
@@ -693,6 +694,7 @@ fprintf(stderr, ">>>> xmos: dev_close()\n");
 
 // HACK
 void xmos_acquisition_start();
+extern uint64_t last_timestamp;
 
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
@@ -768,6 +770,10 @@ fprintf(stderr, ">>>> xmos: dev_acquisition_start()\n");
 		devc->first_partial_logic_index,
 		devc->first_partial_logic_mask);
 
+	devc->first_packet_host_time = -1;
+	// HACK
+	last_timestamp = UINT64_MAX;
+
 	sr_session_source_add(sdi->session, -1, 0, 100,
 			xmos_prepare_data, (struct sr_dev_inst *)sdi);
 
@@ -775,12 +781,17 @@ fprintf(stderr, ">>>> xmos: dev_acquisition_start()\n");
 #if 0
 	if (devc->limit_frames > 0)
 		std_session_send_frame_begin(sdi);
-#endif
+#endif	
 	/* We use this timestamp to decide how many more samples to send. */
 	devc->start_us = g_get_monotonic_time();
 	devc->spent_us = 0;
 	devc->step = 0;
 
+
+
+    // Add pseudo channels
+    add_analogue_channel(254, "Time delta");
+    add_analogue_channel(255, "Missing Data");
 #if 0
 unsigned char cmd = XMOS_CONNECT;
 devc->xmos_tcp_ops->send(devc, &cmd, 1);

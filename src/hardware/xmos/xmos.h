@@ -99,6 +99,7 @@ enum beaglelogic_sampleunit {
 typedef struct {
     uint64_t timestamp;
     uint64_t dataval;
+    int64_t  host_time;
 } xmos_record_t;
 
 typedef struct {
@@ -129,7 +130,9 @@ struct xmos_ops {
 	int (*stop)(struct dev_context *devc);
 
 	void (*xmos_record_iter_init)(xmos_iter_t* iter, unsigned channel);
+#if 0
 	void (*xmos_record_iter_reset)(xmos_iter_t* iter, unsigned channel);
+#endif
 	void (*xmos_record_iter_done)(xmos_iter_t* iter, unsigned channel);
 	void (*xmos_record_iter_undonext)(xmos_iter_t* iter);
 	int  (*xmos_record_iter_next)(xmos_iter_t* iter, unsigned channel, xmos_record_t** record);

@@ -146,6 +146,8 @@ struct dev_context {
 	gboolean trigger_fired;
 	struct soft_trigger_logic *stl;
 
+    int64_t first_packet_host_time;
+
 	/* Socket */
 	int socket;
 	uint64_t read_timeout;
@@ -169,7 +171,7 @@ struct analog_gen {
 	float avg_val; /* Average value */
 	unsigned int num_avgs; /* Number of samples averaged */
 
-	unsigned long samples_todo;
+	int64_t samples_todo;
 };
 
 SR_PRIV void xmos_generate_analog_pattern(struct dev_context *devc);

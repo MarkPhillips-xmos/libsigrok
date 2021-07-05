@@ -259,7 +259,7 @@ static int xmos_send(struct dev_context *devc, const void* buffer, size_t length
 }
 
 
-static uint64_t starting_timestamp = 0xffffffffffffffff;
+static uint64_t starting_timestamp = UINT64_MAX;
 
 // TODO - remove below
 
@@ -278,7 +278,7 @@ static void xscope_register(struct dev_context *devc,
 							char *name, char *unit,
 							unsigned int data_type, char* data_name) {
 
-	printf("xSCOPE register event (id [%d] type [%d], name [%s], unit [%s], data_type[%d])\n", id, type, name, unit, data_type);
+	printf("xSCOPE register event (id [%d] type [%d], name [%s], unit [%s], data_type[%d], data_name[%s])\n", id, type, name, unit, data_type, data_name);
 	// TODO - rmove params
 	devc++;
     r++;
@@ -299,9 +299,6 @@ int unsigned long record_count_out = 0;
 static void xscope_record(unsigned int id, unsigned long long timestamp, unsigned int length, 
                    unsigned long long dataval, unsigned char *databytes) {
 
-
-
-
 	static int records_available = 0;
 	if (0 == records_available) {
 		// Assume all registration is complete first time this function is called
@@ -318,7 +315,6 @@ printf("xscope_record() : unblocked and collecting records\n");
 
 // printf("xSCOPE record event (id [%d] timestamp [%lld] value [%lld] length [%d])\n",id, timestamp, dataval, length);
 
-
 	databytes++;
 
     if (length != 0) {
@@ -330,11 +326,23 @@ printf("xscope_record() : unblocked and collecting records\n");
 
 record_count_in++;
 
-    if (0xffffffffffffffff == starting_timestamp) {
+	int64_t t = g_get_monotonic_time();
+
+    if (UINT64_MAX == starting_timestamp) {
     	// Record the stamp of the first packet received
     	starting_timestamp = timestamp;
+printf("xscope_record() : update starting_timestamp = %lu\n", starting_timestamp);
     }
 
+#if 0
+{
+	static unsigned r = 0;
+	if (0 == r % 1000) {
+		printf("xscope_record() : id %d, timestamp %lu, write_ptr[id] %p\n", id, timestamp, write_ptr[id]);
+	}
+	r++;
+}
+#endif
     write_ptr[id]->timestamp = timestamp;
     write_ptr[id]->dataval = dataval;
 
@@ -347,6 +355,7 @@ record_count_in++;
 
     // If the buffer is full, move the read_ptr on
     if (write_ptr[id] == read_ptr[id]) {
+// printf("xscope_record() : FULL : id %d, timestamp %lu, write_ptr[id] %p\n", id, timestamp, write_ptr[id]);
         if (read_ptr[id] == &buffer_pool[id][NUM_BUF_ENTRIES-1] ) {
             // wrap back to start
             read_ptr[id] = buffer_pool[id];
@@ -360,29 +369,6 @@ record_count_in++;
     MUTEX_UNLOCK(buffer_mutex);
 }
 
-#if 0
-static unsigned xscope_count_records(unsigned long long quantity_in_us) {
-    record_t* next_ptr = read_ptr[i];
-//    unsigned long long start_time_us = read_ptr[i]->timestamp/1000000;
-    unsigned count = 0;
-
-    while (next_ptr != write_ptr[i]) {
-        if (next_ptr == &buffer_pool[NUM_BUF_ENTRIES-1] ) {
-            // wrap back to start
-            next_ptr = buffer_pool;
-        } else {
-            next_ptr++;
-        }
-        count += 1;
-        unsigned long long delta_in_us = (next_ptr->timestamp - read_ptr[i]->timestamp)/1000000;
-
-        if (delta_in_us > quantity_in_us) {
-            break;
-        }
-    }
-    return count;
-}
-#endif
 
 void xmos_acquisition_start(void);
 uint64_t xmos_get_acquisition_start_timestamp(void);
@@ -390,25 +376,32 @@ uint64_t xmos_get_acquisition_start_timestamp(void);
 void xmos_acquisition_start(void) {
 	unsigned i;
 
+printf(">>>> xmos_acquisition_start\n");
+
 	// ignore any data captured before the acquisition was started
 	MUTEX_LOCK(buffer_mutex);
 record_count_in = 0;	
-	starting_timestamp = 0xffffffffffffffff;
+	starting_timestamp = UINT64_MAX;
+
+printf("xscope_record() : reset starting_timestamp = %lu\n", starting_timestamp);
 
 	for (i=0; i<MAX_CHANNELS; i++) {
-		read_ptr[i] = write_ptr[i];
+		read_ptr[i] = write_ptr[i] = buffer_pool[i];
 	}
 	MUTEX_UNLOCK(buffer_mutex);
 
+printf("<<<< xmos_acquisition_start\n");
 }
 
 uint64_t xmos_get_acquisition_start_timestamp() {
 	return starting_timestamp;
 }
 
+#if 0
 static void xmos_record_iter_reset(xmos_iter_t* iter, unsigned channel) {
 	iter->data = read_ptr[channel];
 }
+#endif
 
 static void xmos_record_iter_init(xmos_iter_t* iter, unsigned channel) {
 
@@ -433,6 +426,16 @@ static int xmos_record_iter_next(xmos_iter_t* iter, unsigned channel, xmos_recor
     iter->last_data = next_ptr;
 
 //printf("xmos_record_iter_next: buffer_pool %p, read_ptr[i] %p, write_ptr[i] %p, iter->data %p\n", buffer_pool, read_ptr[i], write_ptr[i], iter->data);
+#if 0
+{
+	static unsigned r = 0;
+	if (0 == r % 1000) {
+		printf("xmos_record_iter_next() : channel %d, write_ptr[channel] %p\n", channel, write_ptr[channel]);
+	}
+	r++;
+}
+#endif
+
 
 	if (next_ptr != write_ptr[channel]) {
 		*record = next_ptr;
@@ -456,69 +459,6 @@ record_count_out--;
 	iter->data = iter->last_data;
 }
 
-#if 0
-
-static int xscope_ep_socket_ready(int ready_socket) {
-    int rc;
-    fd_set fds;
-    struct timeval tv;
-
-    FD_ZERO(&fds);
-    FD_SET(ready_socket, &fds);
-
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-
-    rc = select(1 + ready_socket, &fds, NULL, NULL, &tv);
-
-    if (rc == 0) {
-      // timeout
-      return 0;
-    } else if (rc == -1) {
-      // An error has occurred
-      fprintf(stderr, "INTERNAL error: xscope_ep_socket_ready(%d) errno %d\n", ready_socket, errno);
-      return 0;
-    }
-
-    // rc > 0
-    return FD_ISSET(ready_socket, &fds) ? 1 : 0;
-}
-
-
-static int xscope_ep_socket_read_data(int id, char *data, int length) {
-  int result = -1;
-  int remaining = length;
-  unsigned index = 0;
-
-  //result = xscope_ep_socket->socRecieve(id, data, length);
-  while (remaining>0) {
-    result = recv(id, &(data[index]), remaining, 0);
-    if (0 == result) {
-      // socket closed
-      break;
-    }
-    if (-1 == result) {
-#if defined(__LINUX__) || defined(__linux__) || defined (__CYGWIN__) || defined (__APPLE__)
-      if (errno == EINTR) {
-        continue;
-      }
-      else
-#endif
-      {
-        fprintf(stderr, "INTERNAL error: xscope_ep_socket_read_data(id %d, length %d) errno = %d", id, length, errno);
-        break;
-      }
-    }
-    remaining -= result;
-    index += result;
-  }
-  if (result <= 0) {
-    return XSCOPE_EP_FAILURE;
-  } else {
-    return XSCOPE_EP_SUCCESS;
-  }
-}
-#endif
 
 static THREAD_FUNC_DEC(xscope_ep_data_thread, arg) {
 	struct dev_context *devc = (struct dev_context *)arg;
@@ -1346,7 +1286,7 @@ SR_PRIV const struct xmos_ops xmos_tcp_ops = {
 //	.recv = xmos_recv,
 
 	.xmos_record_iter_init = xmos_record_iter_init,
-    .xmos_record_iter_reset = xmos_record_iter_reset,
+//    .xmos_record_iter_reset = xmos_record_iter_reset,
 	.xmos_record_iter_next = xmos_record_iter_next,
 	.xmos_record_iter_undonext = xmos_record_iter_undonext,
 	.xmos_record_iter_done = xmos_record_iter_done,

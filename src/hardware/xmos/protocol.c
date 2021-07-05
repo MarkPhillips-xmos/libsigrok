@@ -793,15 +793,22 @@ static void xmos_send_analog_packets(struct analog_gen *ag,
 
 #endif
 
-//  #define  FLOG
+#define  FLOG
 // TODO
 uint64_t xmos_get_acquisition_start_timestamp();
 static uint64_t latest_timestamp = 0;
-static uint64_t last_timestamp = 0xffffffffffffffff;
+
+// hack TODO
+uint64_t last_timestamp = UINT64_MAX;
+
 #define MAX_CHANNELS  	256
 #define MAX_SAMPLES   16384
 static float    data[MAX_CHANNELS][MAX_SAMPLES];
 //static unsigned long samples_just_done = 0;
+
+// To keep host time in sync with target time apply an adjustment
+
+static int64_t packet_host_time = -1;
 
 static void xmos_send_analog_channel(struct analog_gen *ag,
 		struct sr_dev_inst *sdi) {
@@ -824,12 +831,14 @@ flog = fopen("/tmp/log.txt", "wt");
 	unsigned long sample_timestamp;
 	unsigned long samples_done = 0;
 
+	int record_available;
+
 	if (!ag->ch || !ag->ch->enabled)
 		goto done;
 
 	devc = sdi->priv;
 
-	const unsigned long sammple_period_ps = UINT64_C(1000000000000)/ devc->cur_samplerate;
+	const unsigned long sammple_period_ps = UINT64_C(1000000000000)/devc->cur_samplerate;
 
 	packet.type = SR_DF_ANALOG;
 	packet.payload = &ag->packet;
@@ -839,30 +848,33 @@ flog = fopen("/tmp/log.txt", "wt");
 	unsigned channel;
 	channel = ag->ch->index;
 
-	if (0xffffffffffffffff == last_timestamp) {
+	if (UINT64_MAX == last_timestamp) {
 		last_timestamp = xmos_get_acquisition_start_timestamp();
-//printf("channel %u, xmos_get_acquisition_start_timestamp %lu\n", channel, last_timestamp);
 	}
 
+	#ifdef FLOG
+	{
+	fprintf(flog, "channel %u, xmos_get_acquisition_start_timestamp %lu\n", channel, last_timestamp);
+	}
+	#endif
+
 	sample_timestamp = last_timestamp;
-#ifdef FLOG
-{
-fprintf(flog, "channel %u, samples_todo %lu\n", channel, samples_todo);
-}
-unsigned datarecs = 0;
-#endif
+
+	#ifdef FLOG
+	{
+	fprintf(flog, "channel %u, samples_todo %lu, sample_timestamp %lu\n", channel, samples_todo, sample_timestamp);
+	}
+	unsigned datarecs = 0;
+	unsigned padding = 0;
+	unsigned padding2 = 0;
+	#endif
 
 	devc->xmos_tcp_ops->xmos_record_iter_init(&xmos_record_iter, channel);
 
-	while  (devc->xmos_tcp_ops->xmos_record_iter_next(&xmos_record_iter, channel, &record)) {
+	record_available = devc->xmos_tcp_ops->xmos_record_iter_next(&xmos_record_iter, channel, &record);
 
-#ifdef FLOG
-{
-fprintf(flog, "channel %u, sammple_period_ps %lu, sample_timestamp %lu, record->timestamp %lu, record->dataval %f\n", 
-	channel, sammple_period_ps, sample_timestamp, record->timestamp, (float)((signed long long)(record->dataval)) );
-}
-unsigned padding = 0;
-#endif
+//	while (devc->xmos_tcp_ops->xmos_record_iter_next(&xmos_record_iter, channel, &record)) {
+	while (record_available || samples_done < samples_todo) {
 
 
 #if 0 
@@ -870,18 +882,130 @@ unsigned padding = 0;
 			// Missed the record ignore ?
 		}
 #endif
-//		while (sample_timestamp < (record->timestamp - sammple_period_ps) &&
-		while (sample_timestamp < record->timestamp &&
-			   samples_done < samples_todo) {
+		if (record_available) {
 
+
+			#ifdef FLOG
+			{
+			int64_t host_ts_ns = ((packet_host_time - devc->first_packet_host_time) * 1000 ) + ((sammple_period_ps * samples_done)/1000);
+
+
+			fprintf(flog, "channel %u, sammple_period_ps %lu, sample_timestamp %lu, host_ts_ns %ld, record->timestamp %lu, record->dataval %f\n", 
+				channel, sammple_period_ps, sample_timestamp, host_ts_ns, ( record->timestamp - xmos_get_acquisition_start_timestamp() ) / 1000, (float)((signed long long)(record->dataval)) );
+			}
+			#endif
+			while (sample_timestamp < record->timestamp &&
+				   samples_done < samples_todo) {
+
+				data[channel][samples_done] = last_sample_value[channel];
+	//data[channel][samples_done] = -1;
+
+				sample_timestamp += sammple_period_ps;
+				samples_done++;
+
+				#ifdef FLOG
+				padding++;
+				#endif
+
+				if (samples_todo == samples_done) {
+					// reached the buffer end - send the buffer
+
+			    	ag->packet.data = data[channel];
+			    	ag->packet.num_samples = samples_done;
+
+					sr_session_send(sdi, &packet);
+
+					#ifdef FLOG
+					{
+					//for (unsigned i=0; i<samples_done; i++) {
+
+					//fwrite(data[channel], sizeof(float), samples_done, flog);
+					fprintf(flog, "pad %ld, datarecs %u, sample_timestamp %lu\n", samples_done, datarecs, sample_timestamp);
+					}
+					#endif
+
+					// Put the record back for next time
+					devc->xmos_tcp_ops->xmos_record_iter_undonext(&xmos_record_iter);
+					goto done;
+				}
+			}
+
+			#ifdef FLOG
+			{
+			int64_t host_ts_ns = ((packet_host_time - devc->first_packet_host_time) * 1000 ) + ((sammple_period_ps * samples_done)/1000);
+
+			fprintf(flog, "EMIT: channel %u, padding %u, padding2 %u, sample_timestamp %lu, host_ts_ns %ld, record->timestamp %lu, record->dataval %f\n", 
+				channel, padding, padding2, sample_timestamp, host_ts_ns, ( record->timestamp - xmos_get_acquisition_start_timestamp() ) / 1000, (float)((signed long long)(record->dataval)) );
+			}
+			#endif
+
+//			int64_t delta = record->timestamp - host_ts_ns;
+
+
+
+
+			// emit record
+			data[channel][samples_done] = (float)((signed long long)(record->dataval));
+	//data[channel][samples_done] = 1;
+			last_sample_value[channel] = data[channel][samples_done];
+
+			sample_timestamp += sammple_period_ps;
+			samples_done++;
+
+			#ifdef FLOG
+			datarecs++;
+			#endif
+
+#if 0
+			// Re-time the host by dropping subsequent sampples it has overrun time reported by the target
+			if (sample_timestamp > record->timestamp) {
+				uint64_t delta_t = sample_timestamp - record->timestamp;
+				uint64_t delta_samples = ((delta_t/1000000) * devc->cur_samplerate + G_USEC_PER_SEC - 1) / G_USEC_PER_SEC;
+				uint64_t samples_remaining = samples_todo - samples_done;
+
+				uint64_t samples_to_drop = MIN(samples_remaining, delta_samples);
+
+				samples_todo -= samples_to_drop;
+				delta_samples -= samples_to_drop;
+
+#ifdef FLOG
+{
+fprintf(flog, "DROP: samples_to_drop %lu\n", samples_to_drop);
+}
+#endif
+				if (delta_samples > 0) {
+					// drop some samples next time round
+					ag->samples_todo -= delta_samples;
+				}
+			}
+#endif
+
+			if (samples_todo == samples_done) {
+				// reached the buffer end - send the buffer
+
+		    	ag->packet.data = data[channel];
+		    	ag->packet.num_samples = samples_done;
+
+				sr_session_send(sdi, &packet);
+#ifdef FLOG
+{
+//for (unsigned i=0; i<samples_done; i++) {
+//fwrite(data[channel], sizeof(float), samples_done, flog);
+fprintf(flog, "data %ld, datarecs %u, val %lu\n", samples_done, datarecs, record->dataval);
+}
+#endif
+				goto done;
+			}
+		} else {
+			// No record available - add padding until one becomes available
 			data[channel][samples_done] = last_sample_value[channel];
 //data[channel][samples_done] = -1;
 
 			sample_timestamp += sammple_period_ps;
 			samples_done++;
-#ifdef FLOG
-padding++;
-#endif
+			#ifdef FLOG
+			padding2++;
+			#endif
 			if (samples_todo == samples_done) {
 				// reached the buffer end - send the buffer
 
@@ -890,60 +1014,24 @@ padding++;
 
 				sr_session_send(sdi, &packet);
 
-#ifdef FLOG
-{
-//for (unsigned i=0; i<samples_done; i++) {
+				#ifdef FLOG
+				{
+				//for (unsigned i=0; i<samples_done; i++) {
 
-//fwrite(data[channel], sizeof(float), samples_done, flog);
-fprintf(flog, "pad %ld, datarecs %u, sample_timestamp %lu\n", samples_done, datarecs, sample_timestamp);
-}
-#endif
-
+				//fwrite(data[channel], sizeof(float), samples_done, flog);
+				fprintf(flog, "pad2 %ld, datarecs %u, sample_timestamp %lu\n", samples_done, datarecs, sample_timestamp);
+				}
+				#endif
 				// Put the record back for next time
-				devc->xmos_tcp_ops->xmos_record_iter_undonext(&xmos_record_iter);
 				goto done;
 			}
+
 		}
+// record_available = devc->xmos_tcp_ops->xmos_record_iter_next(&xmos_record_iter, channel, &record);
+		record_available = devc->xmos_tcp_ops->xmos_record_iter_next(&xmos_record_iter, channel, &record);
 
-#ifdef FLOG
-{
-fprintf(flog, "EMIT: channel %u, padding %u, sample_timestamp %lu, record->timestamp %lu, record->dataval %f\n", 
-	channel, padding, sample_timestamp, record->timestamp, (float)((signed long long)(record->dataval)) );
-}
-#endif
-		// emit record
-		data[channel][samples_done] = (float)((signed long long)(record->dataval));
-//data[channel][samples_done] = 1;
-		last_sample_value[channel] = data[channel][samples_done];
-
-		sample_timestamp += sammple_period_ps;
-		samples_done++;
-#ifdef FLOG
-datarecs++;
-#endif
-// DO NOT 
-//		sample_timestamp = record->timestamp;
-
-//printf("channel %u, buffer_pos %lu, value %f\n", channel, samples_done, (float)((signed long long)(record->dataval)) );
-
-		if (samples_todo == samples_done) {
-			// reached the buffer end - send the buffer
-
-	    	ag->packet.data = data[channel];
-	    	ag->packet.num_samples = samples_done;
-
-			sr_session_send(sdi, &packet);
-#ifdef FLOG
-{
-//for (unsigned i=0; i<samples_done; i++) {
-//fwrite(data[channel], sizeof(float), samples_done, flog);
-fprintf(flog, "data %ld, datarecs %u, val %lu\n", samples_done, datarecs, record->dataval);
-}
-#endif
-			goto done;
-		}
 	}
-
+#if 0
     // There may be samples remaning (no packets from target available)
 	while (samples_done < samples_todo) {
 		data[channel][samples_done] = last_sample_value[channel];
@@ -953,7 +1041,14 @@ fprintf(flog, "data %ld, datarecs %u, val %lu\n", samples_done, datarecs, record
 	ag->packet.data = data[channel];
    	ag->packet.num_samples = samples_done;
 	sr_session_send(sdi, &packet);
-
+#ifdef FLOG
+{
+//for (unsigned i=0; i<samples_done; i++) {
+//fwrite(data[channel], sizeof(float), samples_done, flog);
+fprintf(flog, "tail %ld, datarecs %u\n", samples_done, datarecs);
+}
+#endif
+#endif
 
 done:
 
@@ -961,8 +1056,17 @@ done:
 	devc->xmos_tcp_ops->xmos_record_iter_done(&xmos_record_iter, channel);
 
 	ag->samples_todo -= samples_done;
-//	samples_just_done = MAX(samples_just_done, samples_done);
-	latest_timestamp = MAX(latest_timestamp, sample_timestamp);
+
+	if (last_timestamp != UINT64_MAX) {
+		// Only do this update if we have received a packet
+		latest_timestamp = MAX(latest_timestamp, sample_timestamp);
+	}
+#ifdef FLOG
+{
+fprintf(flog, "<<<: ag->samples_todo %ld, latest_timestamp %lu\n", ag->samples_todo, latest_timestamp);
+}
+#endif
+
 }
 
 /* Callback handling data */
@@ -987,6 +1091,12 @@ SR_PRIV int xmos_prepare_data(int fd, int revents, void *cb_data)
 
 	sdi = cb_data;
 	devc = sdi->priv;
+
+
+    packet_host_time =  g_get_monotonic_time();
+    if (-1 == devc->first_packet_host_time) {
+    	devc->first_packet_host_time = packet_host_time;
+    }
 
 	/* Just in case. */
 	if (devc->cur_samplerate <= 0
@@ -1057,13 +1167,14 @@ printf("<<<< xmos_prepare_data(): samples_todo %lu\n", samples_todo);
 				xmos_send_analog_channel(ag, sdi);
 			}	
 
-			if (0 == ag->samples_todo) {
+			if (ag->samples_todo == 0) {
 				channels_to_complete--;
 			}
 		}
 		// assume all channels sent the same number of samples - use count from the last channel
-		
-		last_timestamp = latest_timestamp;
+		if (last_timestamp != UINT64_MAX) {
+			last_timestamp = latest_timestamp;
+		}
 
 
 //		if (channels_to_complete>0) {
